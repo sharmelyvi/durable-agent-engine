@@ -191,6 +191,30 @@ The one exception is `SimulatedCrash`, which models the process dying. A dead
 process writes nothing, so neither does the engine: the run stays resumable,
 which is what the resume tests are there to measure.
 
+## A store outage is not a broken run
+
+Two failures reach `run()` looking alike and meaning opposite things.
+
+A handler raising is a defect in this run's code. Retrying it unchanged fails
+again, so the run is marked `failed`.
+
+The store raising is infrastructure. Nothing is wrong with the run; the database
+is unreachable. It has to stay non-terminal so it resumes and finishes when the
+database returns. Marking it failed would turn a transient outage into permanent
+loss for every run in flight at that moment — much larger than the outage.
+
+The engine separates them by where its `try` ends: the handler call is inside
+it, the checkpoint write is not. That is a fragile place for a decision this
+consequential to live, so `tests/test_store_outage.py` pins it. The fake outage
+there refuses only successful checkpoints and lets failure records through —
+otherwise, with the whole store down, the error path could not write either and
+the test could not tell an intended non-terminal run from an accidental one.
+
+The effect still runs twice across the outage: once before the write failed,
+once on resume. Both present the same token, so the gateway charges once. This
+is the same property that makes the lock optional, arriving from a different
+direction.
+
 ## The lock is an optimisation, not the guarantee
 
 Locks fail in both backends, in opposite ways.

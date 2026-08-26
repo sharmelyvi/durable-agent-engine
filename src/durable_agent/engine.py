@@ -308,6 +308,15 @@ class Engine:
                     self.store.set_status(run_id, RunStatus.FAILED, reason)
                     raise
 
+                # Deliberately outside the try above, and it must stay there.
+                #
+                # A handler raising is a defect: the run is marked failed. The
+                # store raising is infrastructure: the database is unreachable,
+                # nothing is wrong with this run, and it must stay resumable so
+                # it finishes when the database comes back. Widening the try to
+                # cover this call would turn a transient outage into permanent
+                # failure for every run in flight — see
+                # tests/test_store_outage.py, which pins the distinction.
                 outcome = StepOutcome.HEALED if ctx.was_healed else StepOutcome.OK
                 self.store.append(
                     StepRecord(
