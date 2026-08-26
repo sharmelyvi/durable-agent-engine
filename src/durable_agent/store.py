@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
+import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -74,6 +76,13 @@ CREATE TABLE IF NOT EXISTS runs (
 CREATE UNIQUE INDEX IF NOT EXISTS uq_active_run
     ON runs (idempotency_key)
     WHERE status IN ('pending', 'running');
+
+CREATE TABLE IF NOT EXISTS locks (
+    lock_id    INTEGER PRIMARY KEY,
+    key        TEXT NOT NULL,
+    owner      TEXT NOT NULL,
+    expires_at REAL NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS step_records (
     run_id      TEXT NOT NULL REFERENCES runs (run_id),
@@ -143,6 +152,7 @@ class SQLiteStore:
             idempotency_key=spec.idempotency_key,
             status=RunStatus.PENDING,
             plan_name=spec.plan.name,
+            payload=spec.payload,
         )
 
     def _hydrate(self, conn: sqlite3.Connection, row: sqlite3.Row) -> RunState:
@@ -167,6 +177,7 @@ class SQLiteStore:
             idempotency_key=row["idempotency_key"],
             status=RunStatus(row["status"]),
             plan_name=row["plan_name"],
+            payload=json.loads(row["payload"]),
             steps=steps,
             error=row["error"],
         )
@@ -211,32 +222,36 @@ class SQLiteStore:
             )
 
     @contextmanager
-    def lock(self, key: str) -> Iterator[None]:
-        """Serialise workers on this key.
+    def lock(self, key: str, ttl: float = 60.0) -> Iterator[None]:
+        """Lease-based advisory lock.
 
-        SQLite has no advisory lock, so the write lock on a dedicated row stands
-        in for one. Held for the duration of the run, which is acceptable for a
-        single-machine demo and explicitly not the production story — see
-        PostgresStore.
+        An earlier version held a write transaction open for the duration of the
+        run. That deadlocked against the engine's own checkpoint writes, because
+        SQLite allows exactly one writer and the lock was it. A lease is written
+        and committed immediately, so it excludes other workers without
+        excluding the work.
+
+        The expiry is what makes a crashed worker recoverable: a lock whose
+        holder died is reclaimable once it lapses, and no operator has to go
+        clear it by hand.
         """
-        conn = sqlite3.connect(self.path, isolation_level=None, timeout=0.5)
-        try:
-            conn.execute("PRAGMA journal_mode=WAL")
-            try:
-                conn.execute("BEGIN IMMEDIATE")
-            except sqlite3.OperationalError as exc:
-                raise LockUnavailable(key) from exc
-            conn.execute("CREATE TABLE IF NOT EXISTS locks (lock_id INTEGER PRIMARY KEY, key TEXT)")
+        lock_id = advisory_lock_id(key)
+        owner = uuid.uuid4().hex
+        now = time.time()
+
+        with self._conn(immediate=True) as conn:
+            conn.execute("DELETE FROM locks WHERE lock_id = ? AND expires_at <= ?", (lock_id, now))
+            held = conn.execute("SELECT owner FROM locks WHERE lock_id = ?", (lock_id,)).fetchone()
+            if held is not None:
+                raise LockUnavailable(f"{key} is held by another worker")
             conn.execute(
-                "INSERT OR REPLACE INTO locks (lock_id, key) VALUES (?, ?)",
-                (advisory_lock_id(key), key),
+                "INSERT INTO locks (lock_id, key, owner, expires_at) VALUES (?, ?, ?, ?)",
+                (lock_id, key, owner, now + ttl),
             )
+        try:
             yield
-            conn.execute("COMMIT")
-        except LockUnavailable:
-            raise
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
         finally:
-            conn.close()
+            # Only the holder releases it. A worker whose lease already lapsed
+            # must not delete the lock a successor is now holding.
+            with self._conn(immediate=True) as conn:
+                conn.execute("DELETE FROM locks WHERE lock_id = ? AND owner = ?", (lock_id, owner))

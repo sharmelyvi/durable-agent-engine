@@ -119,6 +119,7 @@ class RunState(BaseModel):
     idempotency_key: str
     status: RunStatus
     plan_name: str
+    payload: dict[str, Any] = Field(default_factory=dict)
     steps: list[StepRecord] = Field(default_factory=list)
     error: str | None = None
 
