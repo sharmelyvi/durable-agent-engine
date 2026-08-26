@@ -148,6 +148,28 @@ different lock ids for the same key and the lock would protect nothing.
 `tests/test_lock_identity.py` demonstrates that failure in subprocesses rather
 than asserting the fix.
 
+## Escalation and failure are different outcomes
+
+`Escalation` means the engine gave up in a way a human should review: a provider
+that stayed unavailable, a schema the model could not satisfy in two
+corrections. It is a business outcome, and the run is marked `escalated`.
+
+Anything else a handler raises is a defect — a typo, a bad cast, a library
+throwing something undocumented. That is marked `failed` and re-raised, so the
+traceback reaches whoever has to fix it rather than being absorbed into a status
+column.
+
+Recording a terminal state before re-raising is not tidiness. The partial unique
+index in I-1 permits exactly one non-terminal run per idempotency key, so a run
+left in `running` would refuse every future submission for that key. A single
+unhandled exception would make that customer's order permanently unprocessable,
+recoverable only by editing the database by hand — a much worse failure than the
+defect that caused it.
+
+The one exception is `SimulatedCrash`, which models the process dying. A dead
+process writes nothing, so neither does the engine: the run stays resumable,
+which is what the resume tests are there to measure.
+
 ## The lock is an optimisation, not the guarantee
 
 Locks fail in both backends, in opposite ways.

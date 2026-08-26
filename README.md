@@ -66,7 +66,7 @@ mechanism rather than describing an intention.
 | **I-1** | At most one active run per idempotency key | Partial unique index on `(idempotency_key) WHERE status IN (pending, running)` | The database rejects the second insert. An application-level check would lose the race |
 | **I-2** | Monotonic, gap-free state progression | Append-only checkpoints keyed on `(run_id, step_index)`; resume position derived by reading them back | A replayed step is a no-op insert, not a second row, so state never goes backwards |
 | **I-3** | At most one external effect | Deterministic token from `blake2b(run_id:step_index)`, handed to the external system | Same token on every replay, so a gateway that deduplicates rejects the repeat |
-| **I-4** | Guaranteed terminal state, with a stated cause | Retries capped, correction rounds capped at two, then escalation | No run stalls half-done, and an escalated run records *why* — the field or the provider that failed |
+| **I-4** | Guaranteed terminal state, with a stated cause | Retries capped, corrections capped at two, then escalation; an unexpected exception marks the run failed before re-raising | No run stalls half-done. A run left non-terminal would block its idempotency key forever, since the index in I-1 permits only one active run per key |
 
 **I-3** is the one that matters most and is easiest to get wrong. There is a
 window between performing an effect and committing its checkpoint that no single
@@ -119,7 +119,9 @@ Each invariant has tests that try to break it:
   force a genuine re-execution and checks the token still matches.
 - **I-4** — `test_chaos.py` runs the engine against a provider failing at rates
   from 0% to 100% and asserts every run reaches a terminal state carrying a
-  reason.
+  reason. `test_handler_defects.py` covers the other direction: a handler
+  raising something the engine never expected still lands terminal, and the
+  idempotency key stays usable afterwards.
 
 ## Measured, including where it loses
 

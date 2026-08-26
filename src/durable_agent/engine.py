@@ -224,6 +224,11 @@ class Engine:
                 )
                 try:
                     output = self.handlers[step.name](ctx)
+                except SimulatedCrash:
+                    # Models the process dying. A dead process writes nothing,
+                    # so neither does this: the run stays resumable, which is
+                    # the whole point of the exercise.
+                    raise
                 except Escalation as exc:
                     self.store.append(
                         StepRecord(
@@ -238,6 +243,31 @@ class Engine:
                     )
                     self.store.set_status(run_id, RunStatus.ESCALATED, exc.reason)
                     return self._reload(run_id)
+                except Exception as exc:
+                    # A handler raising something the engine did not expect is a
+                    # defect, not a business outcome — so it gets FAILED rather
+                    # than ESCALATED, and it is re-raised so the traceback
+                    # reaches whoever has to fix it.
+                    #
+                    # Recording a terminal state first is not tidiness. The
+                    # partial unique index only permits one non-terminal run per
+                    # idempotency key, so a run left in `running` would block
+                    # that key permanently: one bad handler and that customer's
+                    # order could never be submitted again.
+                    reason = f"{type(exc).__name__}: {exc}"
+                    self.store.append(
+                        StepRecord(
+                            run_id=run_id,
+                            index=index,
+                            name=step.name,
+                            outcome=StepOutcome.FAILED,
+                            attempts=ctx.attempts,
+                            output={"error": reason},
+                            tokens_used=ctx.tokens_used,
+                        )
+                    )
+                    self.store.set_status(run_id, RunStatus.FAILED, reason)
+                    raise
 
                 outcome = StepOutcome.HEALED if ctx.was_healed else StepOutcome.OK
                 self.store.append(
