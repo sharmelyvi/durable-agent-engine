@@ -28,6 +28,7 @@ from typing import Any
 
 import psycopg
 from psycopg import errors as pg_errors
+from psycopg import sql
 from psycopg.rows import dict_row
 
 from .models import (
@@ -114,22 +115,36 @@ class PostgresStore:
         self.dsn = dsn or dsn_from_env()
         # A named schema lets several independent deployments — or several
         # concurrent test runs — share one database without sharing tables.
-        if not schema.replace("_", "").isalnum():
-            raise ValueError(f"unsafe schema name: {schema!r}")
+        #
+        # Quoted with psycopg's Identifier rather than a hand-written character
+        # check. A bespoke validator is a guess at which inputs are dangerous;
+        # the driver's quoting is the answer for all of them.
+        #
+        # The length limit is separate and not about safety: Postgres truncates
+        # identifiers at 63 bytes, so two long names sharing a prefix would
+        # silently become the same schema.
+        if not schema:
+            raise ValueError("schema name must not be empty")
+        if len(schema.encode()) > 63:
+            raise ValueError(
+                f"schema name is {len(schema.encode())} bytes; PostgreSQL truncates "
+                "identifiers at 63, which would silently collide"
+            )
         self.schema = schema
+        self._ident = sql.Identifier(schema)
 
     @contextmanager
     def _conn(self) -> Iterator[psycopg.Connection[dict[str, Any]]]:
         with psycopg.connect(self.dsn, autocommit=True, row_factory=dict_row) as conn:
             if self.schema != "public":
-                conn.execute(f"SET search_path TO {self.schema}")
+                conn.execute(sql.SQL("SET search_path TO {}").format(self._ident))
             yield conn
 
     def setup(self) -> None:
         with self._conn() as conn:
             if self.schema != "public":
-                conn.execute(f"CREATE SCHEMA IF NOT EXISTS {self.schema}")
-                conn.execute(f"SET search_path TO {self.schema}")
+                conn.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(self._ident))
+                conn.execute(sql.SQL("SET search_path TO {}").format(self._ident))
             conn.execute(SCHEMA)
 
     def drop(self) -> None:
@@ -137,7 +152,7 @@ class PostgresStore:
         if self.schema == "public":
             raise RuntimeError("refusing to drop the public schema")
         with psycopg.connect(self.dsn, autocommit=True) as conn:
-            conn.execute(f"DROP SCHEMA IF EXISTS {self.schema} CASCADE")
+            conn.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(self._ident))
 
     def create_run(self, run_id: str, spec: RunSpec) -> RunState:
         try:

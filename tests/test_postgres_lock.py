@@ -105,3 +105,40 @@ def test_a_failed_acquisition_does_not_unlock_the_holder(pg) -> None:
             pass  # pragma: no cover
     finally:
         holder.close()
+
+
+def test_a_hostile_schema_name_is_quoted_not_rejected() -> None:
+    """Identifier quoting beats guessing which characters are dangerous.
+
+    A hand-written character filter is a guess at the set of hostile inputs. The
+    driver's quoting handles all of them, so a name that looks like an injection
+    is simply a name, and `public` is still standing afterwards.
+    """
+    from durable_agent.postgres import PostgresStore
+
+    hostile = 'evil"; DROP SCHEMA public CASCADE; --'
+    store = PostgresStore(schema=hostile)
+    store.setup()
+    try:
+        with psycopg.connect(store.dsn) as conn:
+            still_there = conn.execute(
+                "SELECT count(*) FROM information_schema.schemata WHERE schema_name = 'public'"
+            ).fetchone()[0]
+        assert still_there == 1, "the injection would have dropped the public schema"
+    finally:
+        store.drop()
+
+
+def test_an_over_long_schema_name_is_refused() -> None:
+    """Not a safety check — a collision check.
+
+    PostgreSQL truncates identifiers at 63 bytes, so two long names sharing a
+    prefix would silently become the same schema and share tables.
+    """
+    from durable_agent.postgres import PostgresStore
+
+    with pytest.raises(ValueError, match="63"):
+        PostgresStore(schema="t_" + "a" * 70)
+
+    with pytest.raises(ValueError, match="empty"):
+        PostgresStore(schema="")

@@ -4,11 +4,16 @@ Instead of testing only hand-crafted 4-step plans, Hypothesis generates
 arbitrary plan topologies, effect distributions, payload shapes, and crash
 positions to search for edge-case counterexamples.
 
-Invariants formally proven:
+This searches for counterexamples; it does not prove anything. Property-based
+testing explores a sample of the input space and shrinks whatever breaks — which
+is far stronger than a handful of hand-written plans and still not a proof.
+Saying "proven" would claim a model checker that is not here.
+
+Invariants exercised:
 * I-3: at most one external effect, via deterministic effect tokens.
-* I-2: Contiguous checkpoint ordering (no missing intermediate state).
-* I-3: Terminal state convergence under arbitrary step distributions.
-* I-4: Idempotent resume (re-executing a completed run is a no-op).
+* I-2: contiguous checkpoint ordering, so resume position stays defined.
+* I-4: terminal convergence under arbitrary step distributions.
+* I-4: resuming a completed run is a no-op.
 """
 
 from __future__ import annotations
@@ -60,7 +65,7 @@ def _build_engine(store: SQLiteStore, plan: Plan, ledger: EffectLedger) -> Engin
 @settings(max_examples=50, deadline=None)
 @given(plan=generated_plans(), crash_at=st.integers(min_value=0, max_value=10))
 def test_hypothesis_invariants_across_generated_plans(plan: Plan, crash_at: int) -> None:
-    """Prove invariants I-1 to I-4 hold across randomly generated plan graphs."""
+    """Search for a generated plan and crash position that breaks I-1 to I-4."""
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / f"fuzz_{uuid.uuid4().hex}.db"
         store = SQLiteStore(db_path)
