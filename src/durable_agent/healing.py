@@ -96,6 +96,20 @@ def correction_prompt(faults: list[FieldFault], schema_name: str) -> str:
     )
 
 
+def cheaper_retry(original: str, correction: str) -> str:
+    """Pick the retry that costs less.
+
+    Delta correction is not universally cheaper. When the original prompt is
+    short, the fault description is longer than the prompt it replaces, and
+    sending the delta is a net loss — measured at -105% on a one-line prompt in
+    scripts/benchmark.py, which is what prompted this function to exist.
+
+    Resending the original also keeps the model's full task context, so falling
+    back to it is not a compromise; it is the better move at that size.
+    """
+    return correction if len(correction) < len(original) else original
+
+
 def parse_or_faults(text: str, schema: type[T]) -> tuple[T | None, list[FieldFault]]:
     """Validate a response. Returns the model, or the faults preventing it."""
     try:

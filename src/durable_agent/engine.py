@@ -34,7 +34,12 @@ from typing import Any, TypeVar
 
 from pydantic import BaseModel
 
-from .healing import MAX_CORRECTION_ROUNDS, correction_prompt, parse_or_faults
+from .healing import (
+    MAX_CORRECTION_ROUNDS,
+    cheaper_retry,
+    correction_prompt,
+    parse_or_faults,
+)
 from .models import (
     Plan,
     RunSpec,
@@ -131,7 +136,7 @@ class StepContext:
                 fields = ", ".join(f.field for f in faults)
                 raise Escalation(f"schema still invalid after {corrections} corrections: {fields}")
             corrections += 1
-            current = correction_prompt(faults, schema.__name__)
+            current = cheaper_retry(prompt, correction_prompt(faults, schema.__name__))
 
         raise Escalation(f"exhausted {max_attempts} attempts without a valid response")
 
