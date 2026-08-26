@@ -62,6 +62,27 @@ only one record of what happened.
 The cost is a read of all checkpoints at resume. For plans of the size this
 targets — tens of steps, not thousands — that is one indexed query.
 
+## Resume position is an index, so the plan behind it is checked
+
+Deriving resume position from checkpoints removes one source of truth. It
+introduces a subtler one: the index means nothing without the plan it indexes
+into, and `run()` takes that plan from the caller.
+
+A rolling deploy separates the two. Worker v1 dies after step 1; worker v2 is
+already on new code and picks the run up. If a step was removed in between,
+index 2 no longer refers to the same work — and the engine would execute the
+wrong step, mark the run complete, and never charge the customer. Silently: no
+error, no escalation, a `completed` row.
+
+So before resuming, the recorded step names are compared against the plan given.
+A mismatch raises `PlanChanged` and the run is left alone, still resumable under
+the plan it began with.
+
+Only the prefix that already executed is checked. Steps beyond the resume point
+have not happened, so a plan that grows a tail between deploys is still valid
+for an in-flight run — otherwise every deploy would break every run in flight,
+which would make the guard worse than the problem.
+
 ## The window a transaction cannot close
 
 Between performing an external effect and committing its checkpoint, the process

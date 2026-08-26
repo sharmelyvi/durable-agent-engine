@@ -65,6 +65,7 @@ mechanism rather than describing an intention.
 |:--|:--|:--|:--|
 | **I-1** | At most one active run per idempotency key | Partial unique index on `(idempotency_key) WHERE status IN (pending, running)` | The database rejects the second insert. An application-level check would lose the race |
 | **I-2** | Monotonic, gap-free state progression | Append-only checkpoints keyed on `(run_id, step_index)`; resume position derived by reading them back | A replayed step is a no-op insert, not a second row, so state never goes backwards |
+| **I-2b** | Resume applies the plan the run started under | Recorded step names are compared against the plan before resuming; a mismatch raises `PlanChanged` | Resume position is an index, so a plan edited between deploys would point it at different work |
 | **I-3** | At most one external effect | Deterministic token from `blake2b(run_id:step_index)`, handed to the external system | Same token on every replay, so a gateway that deduplicates rejects the repeat |
 | **I-4** | Guaranteed terminal state, with a stated cause | Retries capped, corrections capped at two, then escalation; an unexpected exception marks the run failed before re-raising | No run stalls half-done. A run left non-terminal would block its idempotency key forever, since the index in I-1 permits only one active run per key |
 
@@ -113,7 +114,9 @@ Each invariant has tests that try to break it:
   submit the same key at the same instant, ten trials, and asserts exactly one
   wins.
 - **I-2** — `test_chaos.py` checks that checkpoint indices stay contiguous under
-  provider failure, so resume position is always defined.
+  provider failure, so resume position is always defined. `test_plan_drift.py`
+  covers the other half: a run whose plan was edited mid-flight is refused
+  rather than resumed against the wrong steps.
 - **I-3** — `test_resume.py` kills a run at every step position and asserts the
   effect token is identical across replays; one test deletes a checkpoint to
   force a genuine re-execution and checks the token still matches.

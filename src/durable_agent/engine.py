@@ -69,6 +69,21 @@ class Escalation(Exception):
         self.reason = reason
 
 
+class PlanChanged(Exception):
+    """The plan handed to ``run`` disagrees with what this run already did.
+
+    Resume position is an index. If the plan behind that index has changed —
+    a step inserted, removed or reordered — the index now points at different
+    work, and continuing would silently execute the wrong steps. A run that
+    completed under a plan where index 2 was ``charge`` must not finish under
+    one where index 2 is ``notify``.
+
+    This is not a hypothetical: it is what a rolling deploy looks like from the
+    engine's side. An old worker dies mid-run and a new one, already running
+    changed code, picks it up.
+    """
+
+
 class SimulatedCrash(Exception):
     """Injected by the demo to kill a run mid-flight. Never raised in normal use."""
 
@@ -158,6 +173,28 @@ class StepContext:
 StepHandler = Callable[[StepContext], dict[str, Any]]
 
 
+def _assert_plan_matches_history(plan: Plan, state: RunState) -> None:
+    """Refuse to resume a run whose completed steps no longer match the plan.
+
+    Only the prefix that already ran is checked. Steps after the resume point
+    have not happened yet, so changing them is legitimate — a plan may grow a
+    tail between deploys without invalidating what is already recorded.
+    """
+    for record in state.steps:
+        if record.index >= len(plan.steps):
+            raise PlanChanged(
+                f"run {state.run_id} recorded step {record.index} ({record.name!r}) "
+                f"but the plan now has only {len(plan.steps)} steps"
+            )
+        expected = plan.steps[record.index].name
+        if expected != record.name:
+            raise PlanChanged(
+                f"run {state.run_id} recorded step {record.index} as {record.name!r}, "
+                f"but the plan given now has {expected!r} there. Resuming would "
+                f"execute different work than this run already committed to."
+            )
+
+
 class Engine:
     """Executes plans against a store. Holds no run state of its own."""
 
@@ -203,6 +240,8 @@ class Engine:
             raise KeyError(f"unknown run {run_id}")
         if state.status.is_terminal:
             return state
+
+        _assert_plan_matches_history(plan, state)
 
         with self.store.lock(state.idempotency_key):
             self.store.set_status(run_id, RunStatus.RUNNING)
