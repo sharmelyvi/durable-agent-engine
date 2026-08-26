@@ -9,6 +9,7 @@ first one finished.
 from __future__ import annotations
 
 import threading
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -96,3 +97,38 @@ def test_a_new_run_is_allowed_after_the_previous_one_finishes(
 
     second = engine.submit(spec)
     assert second.run_id != first.run_id
+
+
+def _count_winners(store: SQLiteStore, spec: RunSpec, threads: int) -> int:
+    """Release `threads` workers at once and report how many got the run."""
+    barrier = threading.Barrier(threads)
+    winners: list[str] = []
+    guard = threading.Lock()
+
+    def attempt(_: int) -> None:
+        barrier.wait()
+        try:
+            state = store.create_run(uuid.uuid4().hex, spec)
+        except RunAlreadyActive:
+            return
+        with guard:
+            winners.append(state.run_id)
+
+    with ThreadPoolExecutor(max_workers=threads) as pool:
+        list(pool.map(attempt, range(threads)))
+    return len(winners)
+
+
+def test_the_race_holds_at_double_the_load(store: SQLiteStore, plan: Plan) -> None:
+    """Sixteen threads, ten trials, one winner each time.
+
+    A concurrency test that runs its race once reports whichever way the
+    scheduler happened to go. The eight-thread version above was
+    non-deterministic against an earlier store — six failures in thirty runs —
+    and no single execution could have shown that. Repeating the race is what
+    turns "passed" into "holds".
+    """
+    for trial in range(10):
+        spec = RunSpec(plan=plan, payload={}, idempotency_key=f"stress-{trial:03d}")
+        winners = _count_winners(store, spec, threads=16)
+        assert winners == 1, f"trial {trial} produced {winners} winners"

@@ -24,7 +24,7 @@ import sqlite3
 import time
 import uuid
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Protocol
 
@@ -108,14 +108,19 @@ class SQLiteStore:
     def _conn(self, immediate: bool = False) -> Iterator[sqlite3.Connection]:
         conn = sqlite3.connect(self.path, isolation_level=None, timeout=10.0)
         conn.row_factory = sqlite3.Row
+        in_tx = False
         try:
-            conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA foreign_keys=ON")
+            conn.execute("PRAGMA busy_timeout=10000")
             conn.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
+            in_tx = True
             yield conn
             conn.execute("COMMIT")
+            in_tx = False
         except Exception:
-            conn.execute("ROLLBACK")
+            if in_tx:
+                with suppress(Exception):
+                    conn.execute("ROLLBACK")
             raise
         finally:
             conn.close()
@@ -123,6 +128,7 @@ class SQLiteStore:
     def setup(self) -> None:
         conn = sqlite3.connect(self.path)
         try:
+            conn.execute("PRAGMA journal_mode=WAL")
             conn.executescript(SQLITE_SCHEMA)
             conn.commit()
         finally:
