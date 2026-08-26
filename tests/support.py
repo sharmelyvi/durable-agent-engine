@@ -35,3 +35,31 @@ class EffectLedger:
     @property
     def distinct(self) -> set[str]:
         return set(self.calls)
+
+
+def delete_checkpoint(store, run_id: str, step_index: int) -> None:
+    """Remove one checkpoint, whichever backend is under test.
+
+    Stands in for a crash between performing an effect and committing its
+    record — the one window a database transaction cannot close, and therefore
+    the window the effect token exists for.
+    """
+    if type(store).__name__ == "PostgresStore":
+        with store._conn() as conn:
+            conn.execute(
+                "DELETE FROM step_records WHERE run_id = %s AND step_index = %s",
+                (run_id, step_index),
+            )
+        return
+
+    import sqlite3
+
+    conn = sqlite3.connect(store.path)
+    try:
+        conn.execute(
+            "DELETE FROM step_records WHERE run_id = ? AND step_index = ?",
+            (run_id, step_index),
+        )
+        conn.commit()
+    finally:
+        conn.close()

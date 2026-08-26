@@ -82,32 +82,64 @@ This moves the guarantee to where it can be enforced. It also means the guarante
 is conditional, and the README says so: it holds for external systems that
 honour the token, and not for ones that do not.
 
-## Locking
+## Locking on SQLite
 
-The first implementation held a write transaction open for the duration of a run.
-SQLite allows one writer, and the lock was it, so the engine deadlocked against
-its own checkpoint writes. Every resume test failed on a ten-second timeout.
+SQLite allows exactly one writer. A lock implemented as a held write transaction
+would therefore be that writer, and would exclude the engine's own checkpoint
+writes for the duration of the run — the lock and the work competing for the
+same resource.
 
-The replacement is a lease: a row with an owner and an expiry, written and
+The lock is a lease instead: a row with an owner and an expiry, written and
 committed immediately. It excludes other workers without excluding the work.
 
-The expiry is what makes a crashed holder recoverable — otherwise a worker that
+The expiry is what makes a crashed holder recoverable. Without it, a worker that
 died holding the lock would block that key until an operator cleared it by hand.
-Release is scoped to the owner, so a worker whose lease already lapsed cannot
-delete the lock its successor is now holding.
+Release is scoped to the owner, so a worker whose lease has already lapsed
+cannot delete the lock its successor now holds.
 
-## PostgresStore, designed and not yet built
+## The PostgreSQL backend
 
 The SQLite backend is what lets the demo run with no setup, and its lock is a
-single-machine approximation. The Postgres shape:
+single-machine approximation. `PostgresStore` is the real one:
 
-- `pg_try_advisory_xact_lock(lock_id)` for the run lock, released automatically
-  when the transaction ends — no lease expiry to tune, no orphaned locks.
+- `pg_try_advisory_lock(lock_id)` for the run lock — session-scoped, released by
+  the database when the connection goes away. No lease to expire, nothing to
+  reclaim after a crashed worker.
 - The same partial unique index, which Postgres supports natively.
 - `JSONB` for payloads and step output, so checkpoints are queryable rather than
   opaque blobs.
-- `asyncpg` with a bounded pool, sized against measured contention rather than
-  guessed.
+- `psycopg` 3 synchronously, not `asyncpg`. asyncpg is async-only, and adopting
+  it would mean converting a sequential engine to async for no benefit at this
+  scale. The engine did not change to accommodate the backend.
+- No connection pool yet. Connections are opened per operation, which is honest
+  at this size. A pool belongs here once there is a measured contention number
+  to size it against.
+
+### Why the lock is session-scoped
+
+`pg_try_advisory_xact_lock` looks tidier: the transaction owns the lock, so
+there is no explicit release to forget. It is the wrong trade here.
+
+A transaction-scoped lock must keep a transaction open for as long as the lock
+is held. For an agent run measured in minutes, that leaves the connection `idle
+in transaction`, which pins a snapshot so VACUUM cannot clean up behind it, pins
+a server connection under PgBouncer in transaction mode, and is killed outright
+by any deployment that sets `idle_in_transaction_session_timeout`.
+
+That is observable in `pg_stat_activity`, and the observation is a test:
+`tests/test_postgres_lock.py::test_holding_the_lock_does_not_hold_a_transaction`
+fails if the lock is ever changed to the transaction-scoped form. A design
+decision that lives only in a comment is a decision waiting to be tidied away.
+
+### Test isolation
+
+Each Postgres test runs in its own schema, created at setup and dropped at
+teardown.
+
+Truncating shared tables is the cheaper-looking option and it is fragile
+isolation: one lost commit or one leaked connection lets a test inherit
+another's rows, and the symptom surfaces as a foreign-key violation far from its
+cause. A private schema cannot be contaminated.
 
 The lock id is already computed with `blake2b` rather than Python's `hash()`,
 because `hash()` for strings is randomised per process: two workers would derive

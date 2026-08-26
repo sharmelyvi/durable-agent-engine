@@ -5,13 +5,16 @@ description = "Crash-resilient, at-most-once agent execution on PostgreSQL"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
+# The core has one dependency. SQLite ships with Python, so `pip install
+# durable-agent-engine` gives you a working engine and the demo with nothing
+# else to set up. Postgres is opt-in.
 dependencies = [
   "pydantic>=2.7",
-  "asyncpg>=0.29",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.5"]
+postgres = ["psycopg[binary]>=3.1"]
+dev = ["pytest>=8", "ruff>=0.5", "psycopg[binary]>=3.1"]
 
 [build-system]
 requires = ["hatchling"]

@@ -56,19 +56,19 @@ then lets a second worker pick the run up.
 `make demo --crash-at 3` kills it *after* the charge instead, which is the
 window that actually costs money. The result is the same: one charge.
 
-## Three guarantees, and the mechanism behind each
+## Four invariants, and the mechanism behind each
 
-A guarantee is only as good as the thing enforcing it, so each one names its
+An invariant is only as good as the thing enforcing it, so each one names its
 mechanism rather than describing an intention.
 
-| Guarantee | Enforced by | Fails how |
-|:--|:--|:--|
-| At most one active run per idempotency key | Partial unique index on `(idempotency_key) WHERE status IN (pending, running)` | The database rejects the second insert. An application-level check would lose the race |
-| No repeated work after a crash | Append-only checkpoints keyed on `(run_id, step_index)`; resume position derived by reading them back | A replayed step is `INSERT OR IGNORE`, so it is a no-op rather than a second row |
-| At most one external effect | Deterministic effect token from `blake2b(run_id:step_index)`, handed to the external system | Same token on every replay, so a gateway that deduplicates rejects the repeat |
-| Bounded recovery | Retries capped, correction rounds capped at two, then escalation | An escalated run records *why*, naming the field or provider that failed |
+| # | Guarantee | Enforced by | Fails how |
+|:--|:--|:--|:--|
+| **I-1** | At most one active run per idempotency key | Partial unique index on `(idempotency_key) WHERE status IN (pending, running)` | The database rejects the second insert. An application-level check would lose the race |
+| **I-2** | Monotonic, gap-free state progression | Append-only checkpoints keyed on `(run_id, step_index)`; resume position derived by reading them back | A replayed step is a no-op insert, not a second row, so state never goes backwards |
+| **I-3** | At most one external effect | Deterministic token from `blake2b(run_id:step_index)`, handed to the external system | Same token on every replay, so a gateway that deduplicates rejects the repeat |
+| **I-4** | Guaranteed terminal state, with a stated cause | Retries capped, correction rounds capped at two, then escalation | No run stalls half-done, and an escalated run records *why* — the field or the provider that failed |
 
-The third row is the one that matters most and is easiest to get wrong. There is
+**I-3** is the one that matters most and is easiest to get wrong. There is
 a window between performing an effect and committing its checkpoint that no
 single database transaction can close, because the effect is not in that
 database. A deterministic token moves the deduplication to the system that owns
@@ -79,16 +79,29 @@ the effect, which is the only place it can actually be enforced.
 Everything above is executable.
 
 ```bash
-make verify     # lint, 28 tests, both demo modes
-make bench      # measure the token claim rather than assert it
+make verify         # lint, the suite, both demo modes
+make test-postgres  # the same suite again against real PostgreSQL
+make bench          # measure the token claim rather than assert it
 ```
 
-`tests/test_resume.py` kills a run at every step position and asserts the effect
-token is identical across replays. `tests/test_concurrency.py` releases eight
-threads on a barrier so they submit the same key simultaneously, and checks that
-exactly one wins. `tests/test_chaos.py` runs the engine against a provider
-failing at rates from 0% to 100% and asserts the invariants rather than the
-absence of failure.
+The suite is parametrised over both backends, so every invariant below is
+asserted twice. Two exceptions are marked and skipped rather than faked: lease
+expiry is a SQLite concern, and transaction-scoped lock release is a Postgres
+one. Each backend is tested for the property it actually has.
+
+Each invariant has tests that try to break it:
+
+- **I-1** — `test_concurrency.py` releases sixteen threads on a barrier so they
+  submit the same key at the same instant, ten trials, and asserts exactly one
+  wins.
+- **I-2** — `test_chaos.py` checks that checkpoint indices stay contiguous under
+  provider failure, so resume position is always defined.
+- **I-3** — `test_resume.py` kills a run at every step position and asserts the
+  effect token is identical across replays; one test deletes a checkpoint to
+  force a genuine re-execution and checks the token still matches.
+- **I-4** — `test_chaos.py` runs the engine against a provider failing at rates
+  from 0% to 100% and asserts every run reaches a terminal state carrying a
+  reason.
 
 ## Measured, including where it loses
 
@@ -105,9 +118,10 @@ very long (history + policy + logs)     9159       88     99.0%       88    99.0
 ```
 
 On a one-line prompt the fault description is longer than the prompt it
-replaces, so delta correction costs **more than twice as much**. That result is
-why `healing.cheaper_retry()` exists: the engine sends whichever retry is
-smaller, which is the `engine` column. Reproduce it with `make bench`.
+replaces, so delta correction costs **more than twice as much**. `cheaper_retry()`
+sends whichever retry is smaller, which is the `engine` column: never worse than
+resending, and 86–99% cheaper once there is real context to avoid repeating.
+Reproduce it with `make bench`.
 
 Token counts are a character-count estimate at 4 chars/token, applied
 identically to both arms. The absolute numbers are approximate; the ratio is
@@ -117,10 +131,12 @@ the claim.
 
 Stated here rather than discovered later.
 
-- **SQLite is the shipped backend.** It is what makes the demo run with no
-  setup. Its lock is a lease row, not a `pg_advisory_lock`, and it serialises a
-  single machine rather than coordinating several. `PostgresStore` is designed
-  in `docs/ARCHITECTURE.md` and is not yet implemented.
+- **SQLite is the default, not the only backend.** It is what makes the demo run
+  with no setup, and its lock is a lease row that serialises a single machine.
+  `PostgresStore` uses native advisory locks and coordinates workers across
+  machines; `make test-postgres` runs the whole suite against it. What is *not*
+  here is a connection pool — connections are opened per operation, which is
+  honest at this scale and wrong at a larger one.
 - **Steps run in-process and sequentially.** There is no worker pool, no queue
   and no parallel branch. The durability model does not depend on that, but the
   throughput story does.
@@ -138,12 +154,14 @@ Stated here rather than discovered later.
 ```
 src/durable_agent/
   models.py     contracts, effect tokens, process-stable lock ids
-  store.py      durable state, partial unique index, lease locks
+  store.py      SQLite backend: partial unique index, lease locks
+  postgres.py   PostgreSQL backend: native advisory locks, JSONB checkpoints
   engine.py     step execution, resume, retries, escalation
   healing.py    schema faults reduced to a delta, and when not to use it
   providers.py  provider protocol, mock, and the fault injector
   demo.py       the crash story above
-tests/          resume, concurrency, chaos, lock identity
+tests/          resume, concurrency, chaos, lock identity — run twice,
+                once per backend
 scripts/        the benchmark behind the numbers
 docs/           architecture and design decisions
 ```

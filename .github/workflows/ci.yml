@@ -11,6 +11,19 @@ jobs:
     strategy:
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: durable
+          POSTGRES_DB: durable_test
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 55433:5432
+        options: >-
+          --health-cmd "pg_isready -U durable -d durable_test"
+          --health-interval 2s --health-timeout 3s --health-retries 15
+
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -24,8 +37,14 @@ jobs:
         run: |
           ruff check src tests scripts
           ruff format --check src tests scripts
-      - name: Test
-        run: PYTHONPATH=src pytest -q
+      - name: Test against both backends
+        # The Postgres half of the matrix must actually run in CI. Letting it
+        # skip silently would mean the backend is only ever exercised locally.
+        env:
+          DURABLE_AGENT_DSN: postgresql://durable@127.0.0.1:55433/durable_test
+        run: |
+          PYTHONPATH=src pytest -q
+          PYTHONPATH=src pytest -q -k postgres --no-header | tail -1
       - name: Demo holds its invariant
         run: PYTHONPATH=src python -m durable_agent.demo
       - name: Demo holds under provider failure

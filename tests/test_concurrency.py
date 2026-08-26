@@ -79,14 +79,48 @@ def test_a_live_lease_blocks_a_second_worker(store: SQLiteStore) -> None:
         assert _second_holder_succeeds(store, "stuck-key") is False
 
 
-def test_an_expired_lease_is_reclaimed(store: SQLiteStore) -> None:
+def test_an_expired_lease_is_reclaimed(store) -> None:
     """A worker that died holding the lock must not block the key forever.
 
-    A negative TTL stands in for a lease that lapsed while its holder was gone:
-    the successor takes it over instead of waiting for an operator.
+    SQLite only. A negative TTL stands in for a lease that lapsed while its
+    holder was gone: the successor takes it over instead of waiting for an
+    operator. Postgres has no lease to expire — see the test below for the
+    property that replaces it.
     """
+    if not isinstance(store, SQLiteStore):
+        pytest.skip("lease expiry is a SQLite concern; Postgres scopes the lock to a transaction")
     with store.lock("stuck-key", ttl=-1.0):
         assert _second_holder_succeeds(store, "stuck-key") is True
+
+
+def test_postgres_releases_the_lock_when_the_holder_disappears(store) -> None:
+    """What replaces lease expiry on Postgres.
+
+    The advisory lock lives inside a transaction, so a worker that is killed
+    does not leave anything behind: the connection drops, the transaction
+    aborts, and the database releases the lock. No TTL to tune, nothing to
+    reclaim. This asserts that claim rather than trusting the docstring.
+    """
+    pg = pytest.importorskip("psycopg")
+    if isinstance(store, SQLiteStore):
+        pytest.skip("transaction-scoped locks are a Postgres property")
+
+    from durable_agent.models import advisory_lock_id
+
+    lock_id = advisory_lock_id("orphan-key")
+
+    # A worker takes the lock and then vanishes without releasing it.
+    rogue = pg.connect(store.dsn)
+    rogue.execute("BEGIN")
+    got = rogue.execute("SELECT pg_try_advisory_xact_lock(%s)", (lock_id,)).fetchone()
+    assert got[0] is True
+    assert _second_holder_succeeds(store, "orphan-key") is False, "the lock is held"
+
+    rogue.close()  # the process dies
+
+    assert _second_holder_succeeds(store, "orphan-key") is True, (
+        "Postgres must release a transaction-scoped lock when its holder disconnects"
+    )
 
 
 def test_a_new_run_is_allowed_after_the_previous_one_finishes(
@@ -122,11 +156,10 @@ def _count_winners(store: SQLiteStore, spec: RunSpec, threads: int) -> int:
 def test_the_race_holds_at_double_the_load(store: SQLiteStore, plan: Plan) -> None:
     """Sixteen threads, ten trials, one winner each time.
 
-    A concurrency test that runs its race once reports whichever way the
-    scheduler happened to go. The eight-thread version above was
-    non-deterministic against an earlier store — six failures in thirty runs —
-    and no single execution could have shown that. Repeating the race is what
-    turns "passed" into "holds".
+    A race test that runs its race once reports whichever way the scheduler
+    happened to go that time. A store can be wrong 20% of the time and still
+    pass such a test repeatedly, which is why the race is repeated here and run
+    at higher concurrency than the case above.
     """
     for trial in range(10):
         spec = RunSpec(plan=plan, payload={}, idempotency_key=f"stress-{trial:03d}")

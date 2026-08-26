@@ -14,6 +14,8 @@ import pytest
 from durable_agent.engine import Engine, SimulatedCrash
 from durable_agent.models import Plan, RunStatus, StepOutcome
 
+from .support import delete_checkpoint
+
 
 def test_crash_before_effect_then_resume_completes(
     engine: Engine, plan: Plan, submitted: str, ledger
@@ -72,12 +74,7 @@ def test_effect_token_is_identical_across_restarts(
 
     # Force a replay of the effect step by deleting its checkpoint, standing in
     # for a crash between performing the effect and committing the checkpoint.
-    import sqlite3
-
-    conn = sqlite3.connect(engine.store.path)
-    conn.execute("DELETE FROM step_records WHERE run_id = ? AND step_index = 2", (submitted,))
-    conn.commit()
-    conn.close()
+    delete_checkpoint(engine.store, submitted, step_index=2)
 
     engine.run(submitted, plan)
 

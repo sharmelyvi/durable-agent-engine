@@ -7,8 +7,8 @@ and the answer has to survive that.
 Two backends implement the same protocol:
 
 * ``SQLiteStore``   — zero configuration, used by the demo and the test suite.
-* ``PostgresStore`` — the production shape, using transaction-scoped advisory
-  locks so several workers can compete for the same run safely.
+* ``PostgresStore`` — in ``postgres.py``, the production shape, using native
+  advisory locks so several workers can compete for the same run safely.
 
 They are not interchangeable in their concurrency guarantees, and that
 difference is documented rather than smoothed over. SQLite serialises writers
@@ -231,15 +231,15 @@ class SQLiteStore:
     def lock(self, key: str, ttl: float = 60.0) -> Iterator[None]:
         """Lease-based advisory lock.
 
-        An earlier version held a write transaction open for the duration of the
-        run. That deadlocked against the engine's own checkpoint writes, because
-        SQLite allows exactly one writer and the lock was it. A lease is written
-        and committed immediately, so it excludes other workers without
-        excluding the work.
+        SQLite allows exactly one writer, so a lock implemented as a held write
+        transaction would *be* that writer and would exclude the engine's own
+        checkpoint writes for the whole run — the lock competing with the work
+        it is meant to protect. A lease is written and committed immediately,
+        which excludes other workers without excluding the work.
 
-        The expiry is what makes a crashed worker recoverable: a lock whose
-        holder died is reclaimable once it lapses, and no operator has to go
-        clear it by hand.
+        The expiry is what makes a crashed holder recoverable: a lock whose
+        owner died is reclaimable once it lapses, so no operator has to clear it
+        by hand.
         """
         lock_id = advisory_lock_id(key)
         owner = uuid.uuid4().hex
