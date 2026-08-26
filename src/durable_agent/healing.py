@@ -46,27 +46,71 @@ class FieldFault:
         return {"field": self.field, "problem": self.problem, "received": self.received}
 
 
-def extract_json(text: str) -> Any:
-    """Pull a JSON object out of a response that may be wrapped in prose.
+def json_candidates(text: str) -> list[Any]:
+    """Every JSON value that can be read out of a response, in the order found.
 
     Models fence their JSON, apologise before it, and add commentary after it.
-    Refusing to handle that is not strictness, it is just a fragile parser.
+    Refusing to handle that is not strictness, just a fragile parser.
+
+    Returning every candidate rather than the first one matters: a response can
+    contain more than one JSON object, and the first is often an example of the
+    format rather than the answer. Deciding between them needs the schema, which
+    lives one function up.
     """
-    candidates: list[str] = []
-    fenced = _FENCE.search(text)
-    if fenced:
-        candidates.append(fenced.group(1).strip())
+    seen: list[str] = []
+    for fenced in _FENCE.finditer(text):
+        seen.append(fenced.group(1).strip())
     start, end = text.find("{"), text.rfind("}")
     if start != -1 and end > start:
-        candidates.append(text[start : end + 1])
-    candidates.append(text.strip())
+        seen.append(text[start : end + 1])
+        # The widest span fails when a response holds two objects, so also try
+        # each brace-balanced region on its own.
+        seen.extend(_balanced_objects(text))
+    seen.append(text.strip())
 
-    for candidate in candidates:
+    values: list[Any] = []
+    for candidate in seen:
         try:
-            return json.loads(candidate)
+            values.append(json.loads(candidate))
         except json.JSONDecodeError:
             continue
-    raise Unparseable(text[:200])
+    if not values:
+        raise Unparseable(text[:200])
+    return values
+
+
+def _balanced_objects(text: str) -> list[str]:
+    """Each top-level {...} region, found by counting braces."""
+    out: list[str] = []
+    depth = 0
+    start = -1
+    in_string = False
+    escaped = False
+    for i, ch in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}" and depth:
+            depth -= 1
+            if depth == 0 and start != -1:
+                out.append(text[start : i + 1])
+    return out
+
+
+def extract_json(text: str) -> Any:
+    """The first readable JSON value. Prefer ``json_candidates`` with a schema."""
+    return json_candidates(text)[0]
 
 
 def faults_from(error: ValidationError) -> list[FieldFault]:
@@ -97,23 +141,35 @@ def correction_prompt(faults: list[FieldFault], schema_name: str) -> str:
 
 
 def cheaper_retry(original: str, correction: str) -> str:
-    """Pick the retry that costs less.
+    """Pick the cheaper retry, but never one carrying no information.
 
-    Delta correction is not universally cheaper. When the original prompt is
-    short, the fault description is longer than the prompt it replaces, and
-    sending the delta is a net loss — measured at -105% on a one-line prompt in
-    scripts/benchmark.py, which is what prompted this function to exist.
+    Delta correction is not universally cheaper. On a short prompt the fault
+    description is longer than the prompt it replaces — measured at -105% in
+    scripts/benchmark.py, which is what this function exists for.
 
-    Resending the original also keeps the model's full task context, so falling
-    back to it is not a compromise; it is the better move at that size.
+    The fallback is not the bare original, though. Resending the exact prompt
+    that just failed tells the model nothing about what was wrong, so a
+    deterministic model returns the same invalid answer and the correction round
+    is spent for nothing. The original plus a short fault note is still cheaper
+    than a full delta at that size, and unlike a bare resend it can actually
+    succeed.
     """
-    return correction if len(correction) < len(original) else original
+    if len(correction) < len(original):
+        return correction
+    return f"{original}\n\n{correction}"
 
 
 def parse_or_faults(text: str, schema: type[T]) -> tuple[T | None, list[FieldFault]]:
-    """Validate a response. Returns the model, or the faults preventing it."""
+    """Validate a response against a schema, or report what stopped it.
+
+    When a response holds several JSON values — a worked example followed by the
+    real answer is the common shape — the schema decides between them, and the
+    *last* one that validates wins. Models put their answer after their
+    explanation, and taking the first match would return the example: a wrong
+    value wearing the right shape, which is worse than no value at all.
+    """
     try:
-        data = extract_json(text)
+        values = json_candidates(text)
     except Unparseable:
         return None, [
             FieldFault(
@@ -122,7 +178,13 @@ def parse_or_faults(text: str, schema: type[T]) -> tuple[T | None, list[FieldFau
                 received=text[:120],
             )
         ]
-    try:
-        return schema.model_validate(data), []
-    except ValidationError as exc:
-        return None, faults_from(exc)
+
+    last_error: ValidationError | None = None
+    for data in reversed(values):
+        try:
+            return schema.model_validate(data), []
+        except ValidationError as exc:
+            last_error = exc
+    if last_error is None:  # pragma: no cover - json_candidates never returns empty
+        raise Unparseable(text[:200])
+    return None, faults_from(last_error)

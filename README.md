@@ -133,22 +133,27 @@ resend the whole prompt. Sending only the fields that failed is cheaper — but
 not always, and the benchmark says where the line is.
 
 ```
-context                                naive    delta    delta%   engine  engine%
-short (a one-line question)               43       88   -104.7%       43     0.0%
-medium (a page of policy)                636       88     86.2%       88    86.2%
-long (a full customer history)          3071       88     97.1%       88    97.1%
-very long (history + policy + logs)     9159       88     99.0%       88    99.0%
+context                                      naive     delta    engine   vs delta
+short (a one-line question)            43 (no fix)        88       131        +43
+medium (a page of policy)             636 (no fix)        88        88       same
+long (a full customer history)       3071 (no fix)        88        88       same
+very long (history + policy + logs)  9159 (no fix)        88        88       same
 ```
 
-On a one-line prompt the fault description is longer than the prompt it
-replaces, so delta correction costs **more than twice as much**. `cheaper_retry()`
-sends whichever retry is smaller, which is the `engine` column: never worse than
-resending, and 86–99% cheaper once there is real context to avoid repeating.
-Reproduce it with `make bench`.
+Where the delta is smaller it saves 86-99% of the retry. The interesting column
+is `naive`: resending an unchanged prompt is the cheapest thing on the table and
+**recovers nothing**, because a deterministic model given identical input
+returns its identical invalid answer. It is spent twice and escalates anyway.
+
+On a one-line prompt the fault description costs more than the prompt it would
+replace, so `cheaper_retry()` keeps the original and attaches the fault to it —
+131 tokens instead of 43, and the only arm in that row that ends with a valid
+object. Cost per retry is the wrong axis; cost per *recovered* response is the
+one that decides.
 
 Token counts are a character-count estimate at 4 chars/token, applied
-identically to both arms. The absolute numbers are approximate; the ratio is
-the claim.
+identically to every arm. The absolute numbers are approximate; the ratio and
+the recovery outcome are the claim. Reproduce with `make bench`.
 
 ## Limits
 

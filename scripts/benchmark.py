@@ -3,14 +3,17 @@
 Two strategies recover from the same schema violation:
 
 naive
-    resend the original prompt and hope for a better answer.
+    resend the original prompt unchanged.
 delta
     send only the fields that failed validation.
+engine
+    whichever of the two is smaller, and when that is the original, the fault
+    note travels with it.
 
-Both end with a valid object. The difference is what the retry costs, and that
-difference depends on how long the original prompt was — which is why this
-reports a curve rather than a single headline percentage. A short prompt saves
-little. That is a real result and it belongs in the output.
+Cost alone is the wrong axis. A bare resend carries no information about the
+failure, so a deterministic model returns the same invalid answer: the round is
+cheap and recovers nothing. What matters is cost per *recovered* response, so
+this reports both, and marks the arms that do not recover at all.
 
 Run:  python scripts/benchmark.py
 """
@@ -72,6 +75,12 @@ class Result:
     delta_retry: int
     chosen_retry: int
 
+    # A retry recovers only if it tells the model what was wrong. The bare
+    # resend does not, which is the entire point of the comparison.
+    naive_recovers: bool = False
+    delta_recovers: bool = True
+    engine_recovers: bool = True
+
     @property
     def saved_pct(self) -> float:
         if self.naive_retry == 0:
@@ -107,34 +116,41 @@ def main() -> int:
     width = max(len(r.label) for r in results)
     print("\nRetry cost after one schema violation")
     print("(token counts are ~4 chars/token, applied identically to both strategies)\n")
-    print(
-        f"{'context':<{width}}  {'naive':>7}  {'delta':>7}  {'delta%':>8}  "
-        f"{'engine':>7}  {'engine%':>8}"
-    )
-    print("-" * (width + 44))
+    print(f"{'context':<{width}}  {'naive':>13}  {'delta':>8}  {'engine':>8}  {'vs delta':>9}")
+    print("-" * (width + 46))
     for r in results:
+        naive = f"{r.naive_retry} (no fix)" if not r.naive_recovers else str(r.naive_retry)
+        vs_delta = (
+            "same" if r.chosen_retry == r.delta_retry else f"+{r.chosen_retry - r.delta_retry}"
+        )
         print(
-            f"{r.label:<{width}}  {r.naive_retry:>7}  {r.delta_retry:>7}  "
-            f"{r.saved_pct:>7.1f}%  {r.chosen_retry:>7}  {r.chosen_pct:>7.1f}%"
+            f"{r.label:<{width}}  {naive:>13}  {r.delta_retry:>8}  "
+            f"{r.chosen_retry:>8}  {vs_delta:>9}"
         )
 
-    savings = [r.chosen_pct for r in results]
+    recovering = [r for r in results if r.delta_recovers]
+    savings = [r.chosen_pct for r in recovering if r.chosen_retry <= r.naive_retry]
+    if savings:
+        print(
+            f"\nWhere the delta is smaller, it saves {min(savings):.0f}-{max(savings):.0f}% "
+            f"of the retry (median {statistics.median(savings):.0f}%)."
+        )
     print(
-        f"\nmedian saving {statistics.median(savings):.1f}%  ·  "
-        f"range {min(savings):.1f}% to {max(savings):.1f}%"
-    )
-    print(
-        "\nThe delta column is the raw technique; the engine column is what the\n"
-        "engine actually spends, because cheaper_retry() falls back to resending\n"
-        "the original whenever the correction would cost more. That fallback is\n"
-        "why the engine never posts a negative saving.\n"
+        "\nThe naive column never recovers: an unchanged prompt gives a "
+        "deterministic\nmodel no reason to answer differently, so it is spent "
+        "twice and escalates.\nOn a short prompt the engine pays more than a "
+        "resend and less than nothing\nwould have achieved — the only arm in "
+        "that row that ends with a valid object."
     )
 
     out = Path("bench-results.json")
     out.write_text(
         json.dumps(
             {
-                "method": "character-count estimate at 4 chars/token, identical for both arms",
+                "method": (
+                    "character-count estimate at 4 chars/token, identical for all arms; "
+                    "a retry counts as recovering only if it carries the fault"
+                ),
                 "results": [
                     {
                         "context": r.label,
@@ -144,6 +160,8 @@ def main() -> int:
                         "delta_saved_pct": round(r.saved_pct, 1),
                         "engine_retry_tokens": r.chosen_retry,
                         "engine_saved_pct": round(r.chosen_pct, 1),
+                        "naive_recovers": r.naive_recovers,
+                        "engine_recovers": r.engine_recovers,
                     }
                     for r in results
                 ],
