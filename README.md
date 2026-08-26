@@ -68,21 +68,39 @@ mechanism rather than describing an intention.
 | **I-3** | At most one external effect | Deterministic token from `blake2b(run_id:step_index)`, handed to the external system | Same token on every replay, so a gateway that deduplicates rejects the repeat |
 | **I-4** | Guaranteed terminal state, with a stated cause | Retries capped, correction rounds capped at two, then escalation | No run stalls half-done, and an escalated run records *why* — the field or the provider that failed |
 
-**I-3** is the one that matters most and is easiest to get wrong. There is
-a window between performing an effect and committing its checkpoint that no
-single database transaction can close, because the effect is not in that
-database. A deterministic token moves the deduplication to the system that owns
-the effect, which is the only place it can actually be enforced.
+**I-3** is the one that matters most and is easiest to get wrong. There is a
+window between performing an effect and committing its checkpoint that no single
+database transaction can close, because the effect is not in that database. A
+deterministic token moves the deduplication to the system that owns the effect,
+which is the only place it can actually be enforced.
+
+The guarantee is therefore conditional, and the condition is worth stating
+plainly: it holds for an external system that honours the token. Gateways that
+implement idempotency keys — MercadoPago, Stripe and most others — do. One that
+ignores the key will happily charge twice, and no amount of care on this side of
+the call changes that.
+
+Within that condition, **the guarantee does not depend on the lock**. Locks fail: a lease
+can expire while its holder is still working, and a session lock outlives a
+handler that hangs. `tests/test_lock_is_an_optimisation.py` removes the lock
+entirely, runs three workers into the same effect simultaneously, and asserts
+the gateway still sees one token. The lock stops the engine paying twice for the
+same work; the token is what stops the customer being charged twice.
 
 ## Verifying the claims
 
 Everything above is executable.
 
 ```bash
-make verify         # lint, the suite, both demo modes
+make verify         # lint, types, the suite, both demo modes
 make test-postgres  # the same suite again against real PostgreSQL
 make bench          # measure the token claim rather than assert it
 ```
+
+`make types` runs mypy over `src/`, and CI fails on a type error. The `Store`
+protocol is the load-bearing abstraction here — two backends behind one
+interface — and a protocol nothing checks is documentation wearing a contract's
+clothes.
 
 The suite is parametrised over both backends, so every invariant below is
 asserted twice. Two exceptions are marked and skipped rather than faked: lease
@@ -137,9 +155,24 @@ Stated here rather than discovered later.
   machines; `make test-postgres` runs the whole suite against it. What is *not*
   here is a connection pool — connections are opened per operation, which is
   honest at this scale and wrong at a larger one.
-- **Steps run in-process and sequentially.** There is no worker pool, no queue
-  and no parallel branch. The durability model does not depend on that, but the
-  throughput story does.
+- **Plans are sequences, not graphs.** Steps run in order, in-process. There is
+  no conditional branch, no parallel fan-out and no worker pool. Conditional
+  logic lives inside a step's handler today; explicit dependencies between steps
+  would be the change that makes it a DAG.
+- **Checkpoints hold their payloads inline.** Step output and run payload go
+  into the row as JSONB. A step returning a 25MB document would put 25MB in the
+  checkpoint, bloat the WAL and slow every resume that reads it back. The
+  production shape is a URI in the checkpoint and the bytes in object storage.
+- **Connections are opened per operation.** Postgres defaults to 100
+  `max_connections`; several hundred concurrent workers would exhaust that and
+  start being refused. PgBouncer in front, or `psycopg_pool` sized against
+  measured contention, is the answer — and the sizing needs the measurement,
+  which is why there is no arbitrary number here.
+- **A hung handler holds its lock.** The engine hands network calls to the
+  handler and does not impose a deadline. A handler that blocks forever — an
+  HTTP call with no timeout — keeps the Postgres session lock indefinitely,
+  because the connection never closes. Bound your handlers. Note that the
+  at-most-once guarantee survives this anyway: see below.
 - **No compensation.** A run that escalates after a committed effect leaves that
   effect in place; there is no rollback step. Compensating actions are the
   obvious next layer and are deliberately out of scope for now.

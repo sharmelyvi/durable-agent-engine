@@ -79,8 +79,9 @@ standard, and which MercadoPago, Stripe and others all implement — recognises 
 and returns the original result instead of acting again.
 
 This moves the guarantee to where it can be enforced. It also means the guarantee
-is conditional, and the README says so: it holds for external systems that
-honour the token, and not for ones that do not.
+is conditional: it holds for external systems that honour the token, and not for
+ones that do not. The README states the same condition rather than leaving it to
+this file.
 
 ## Locking on SQLite
 
@@ -146,6 +147,32 @@ because `hash()` for strings is randomised per process: two workers would derive
 different lock ids for the same key and the lock would protect nothing.
 `tests/test_lock_identity.py` demonstrates that failure in subprocesses rather
 than asserting the fix.
+
+## The lock is an optimisation, not the guarantee
+
+Locks fail in both backends, in opposite ways.
+
+A SQLite lease can expire while its holder is still alive and working — the
+classic hazard of lease-based locking, and the reason distributed systems reach
+for fencing tokens. A Postgres session lock has the inverse problem: it is held
+by the connection, so a handler that hangs on a network call keeps it until
+someone kills the process. Neither backend can promise that exactly one worker
+is executing a given run at a given instant.
+
+That would be alarming if the guarantee rested on mutual exclusion. It does not.
+
+The effect token is derived from `(run_id, step_index)`, so two workers running
+the same step present the *same* token, and the external system deduplicates
+them. The checkpoint's primary key does the same job for state: whoever writes
+second is a no-op. `tests/test_lock_is_an_optimisation.py` removes the lock
+entirely, drives three workers into the same effect through a barrier, and
+asserts the gateway still sees one token.
+
+So the lock earns its place for a different reason: it keeps the engine from
+paying for the same work twice. Losing it costs money in tokens, not
+correctness. That distinction is worth being explicit about, because a design
+whose safety depends on a lock is a design that fails the first time the lock
+does.
 
 ## What was deliberately left out
 

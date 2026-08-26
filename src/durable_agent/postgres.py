@@ -119,7 +119,7 @@ class PostgresStore:
         self.schema = schema
 
     @contextmanager
-    def _conn(self) -> Iterator[psycopg.Connection]:
+    def _conn(self) -> Iterator[psycopg.Connection[dict[str, Any]]]:
         with psycopg.connect(self.dsn, autocommit=True, row_factory=dict_row) as conn:
             if self.schema != "public":
                 conn.execute(f"SET search_path TO {self.schema}")
@@ -166,7 +166,7 @@ class PostgresStore:
             payload=spec.payload,
         )
 
-    def _hydrate(self, conn: psycopg.Connection, row: dict[str, Any]) -> RunState:
+    def _hydrate(self, conn: psycopg.Connection[dict[str, Any]], row: dict[str, Any]) -> RunState:
         steps = [
             StepRecord(
                 run_id=r["run_id"],
@@ -240,7 +240,11 @@ class PostgresStore:
         ``ttl`` is accepted to satisfy the Store protocol and ignored. There is
         no expiry to guess at: the lock belongs to the connection, and Postgres
         releases it when that connection goes away, including when the process
-        is killed. Nothing lapses and nothing needs reclaiming.
+        is killed.
+
+        A process that *hangs* rather than dies is the exception: the connection
+        stays open, so the lock stays held with nothing to reclaim it. Bound
+        your handlers — see the limits section of the README.
 
         Session-scoped rather than ``pg_try_advisory_xact_lock``, and the
         difference is not cosmetic. A transaction-scoped lock must keep a

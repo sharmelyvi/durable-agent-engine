@@ -24,7 +24,7 @@ import sqlite3
 import time
 import uuid
 from collections.abc import Iterator
-from contextlib import contextmanager, suppress
+from contextlib import AbstractContextManager, contextmanager, suppress
 from pathlib import Path
 from typing import Protocol
 
@@ -57,7 +57,7 @@ class Store(Protocol):
     def find_by_key(self, idempotency_key: str) -> RunState | None: ...
     def append(self, record: StepRecord) -> None: ...
     def set_status(self, run_id: str, status: RunStatus, error: str | None = None) -> None: ...
-    def lock(self, key: str) -> Iterator[None]: ...
+    def lock(self, key: str, ttl: float = ...) -> AbstractContextManager[None]: ...
 
 
 SQLITE_SCHEMA = """

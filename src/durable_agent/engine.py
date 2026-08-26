@@ -87,8 +87,10 @@ class StepContext:
     payload: dict[str, Any]
     previous: dict[str, dict[str, Any]]
     provider: Provider
+    max_attempts: int = 3
     _tokens: list[int] = field(default_factory=list)
     _corrections: list[int] = field(default_factory=list)
+    _attempts: int = 0
 
     @property
     def effect_token(self) -> str:
@@ -100,11 +102,18 @@ class StepContext:
         return sum(self._tokens)
 
     @property
+    def attempts(self) -> int:
+        """Provider calls this step actually made. At least one, even if the
+        step never reached a model — a checkpoint claiming zero attempts would
+        be as wrong as one always claiming exactly one."""
+        return max(1, self._attempts)
+
+    @property
     def was_healed(self) -> bool:
         """True if any model call needed a correction round to validate."""
         return any(c > 0 for c in self._corrections)
 
-    def ask(self, prompt: str, schema: type[T], max_attempts: int = 3) -> T:
+    def ask(self, prompt: str, schema: type[T], max_attempts: int | None = None) -> T:
         """Call the model and return a validated object, or escalate.
 
         Transient failures are retried with exponential backoff. Schema
@@ -112,14 +121,19 @@ class StepContext:
         MAX_CORRECTION_ROUNDS. Anything still broken after that is a human's
         problem, and saying so is more useful than looping.
         """
+        # Defaults to the budget declared on the Step. Passing a number here
+        # overrides it for one call; leaving it out means the plan decides,
+        # which is where a retry budget belongs.
+        budget = self.max_attempts if max_attempts is None else max_attempts
         current = prompt
         corrections = 0
 
-        for attempt in range(1, max_attempts + 1):
+        for attempt in range(1, budget + 1):
+            self._attempts += 1
             try:
                 completion = self.provider.complete(current)
             except TRANSIENT as exc:
-                if attempt == max_attempts:
+                if attempt == budget:
                     raise Escalation(
                         f"provider unavailable after {attempt} attempts: {exc}"
                     ) from exc
@@ -138,7 +152,7 @@ class StepContext:
             corrections += 1
             current = cheaper_retry(prompt, correction_prompt(faults, schema.__name__))
 
-        raise Escalation(f"exhausted {max_attempts} attempts without a valid response")
+        raise Escalation(f"exhausted {budget} attempts without a valid response")
 
 
 StepHandler = Callable[[StepContext], dict[str, Any]]
@@ -174,7 +188,8 @@ class Engine:
             return self.submit(spec)
         except RunAlreadyActive as exc:
             existing = self.store.load(exc.run_id)
-            assert existing is not None
+            if existing is None:
+                raise RuntimeError(f"run {exc.run_id} vanished between conflict and read") from exc
             return existing
 
     def run(self, run_id: str, plan: Plan, crash_at: int | None = None) -> RunState:
@@ -205,6 +220,7 @@ class Engine:
                     payload=payload,
                     previous=previous,
                     provider=self.provider,
+                    max_attempts=step.max_attempts,
                 )
                 try:
                     output = self.handlers[step.name](ctx)
@@ -215,7 +231,7 @@ class Engine:
                             index=index,
                             name=step.name,
                             outcome=StepOutcome.FAILED,
-                            attempts=1,
+                            attempts=ctx.attempts,
                             output={"error": exc.reason},
                             tokens_used=ctx.tokens_used,
                         )
@@ -230,7 +246,7 @@ class Engine:
                         index=index,
                         name=step.name,
                         outcome=outcome,
-                        attempts=1,
+                        attempts=ctx.attempts,
                         output=output,
                         tokens_used=ctx.tokens_used,
                     )
@@ -242,5 +258,6 @@ class Engine:
 
     def _reload(self, run_id: str) -> RunState:
         state = self.store.load(run_id)
-        assert state is not None
+        if state is None:
+            raise RuntimeError(f"run {run_id} disappeared while it was executing")
         return state

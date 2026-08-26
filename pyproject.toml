@@ -14,7 +14,7 @@ dependencies = [
 
 [project.optional-dependencies]
 postgres = ["psycopg[binary]>=3.1"]
-dev = ["pytest>=8", "ruff>=0.5", "psycopg[binary]>=3.1"]
+dev = ["pytest>=8", "ruff>=0.5", "mypy>=1.10", "psycopg[binary]>=3.1"]
 
 [build-system]
 requires = ["hatchling"]
@@ -33,3 +33,14 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["src/durable_agent"]
+ignore_missing_imports = true
+# The Store protocol is the load-bearing abstraction here. Without a checker
+# nothing verifies that a backend actually satisfies it, and a protocol nobody
+# checks is documentation pretending to be a contract.
+strict_equality = true
+warn_unused_ignores = true
+warn_redundant_casts = true

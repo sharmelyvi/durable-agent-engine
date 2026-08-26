@@ -103,3 +103,74 @@ def test_checkpoints_record_token_cost_per_step(engine: Engine, plan: Plan, subm
     assert by_name["parse"].tokens_used == 0, "a deterministic step spends none"
     assert final.tokens_used == sum(s.tokens_used for s in final.steps)
     assert all(s.outcome is StepOutcome.OK for s in final.steps)
+
+
+def test_a_step_records_the_attempts_it_actually_made(store) -> None:
+    """The attempts column has to mean something.
+
+    Recording a literal 1 for every step would make the column decorative: a
+    step that burned three provider calls before succeeding would be
+    indistinguishable in the record from one that succeeded immediately, and
+    cost attribution after an incident would be guesswork.
+    """
+    from durable_agent.engine import Engine, StepContext
+    from durable_agent.models import Plan, RunSpec, Step
+    from durable_agent.providers import ChaosProvider
+
+    from .support import Decision
+
+    def assess(ctx: StepContext) -> dict:
+        return ctx.ask("Assess this.", Decision).model_dump()
+
+    # Fails twice, then answers: three provider calls for one step. The draws
+    # are scripted rather than seeded, because the point is the exact count.
+    class ScriptedProvider(ChaosProvider):
+        def __init__(self) -> None:
+            super().__init__(failure_rate=1.0, seed=3, modes=("timeout",), heal_after=0)
+            self._draws = iter([0.0, 0.0, 1.0])  # fail, fail, succeed
+
+        def complete(self, prompt: str):  # type: ignore[override]
+            self.rng.random = lambda: next(self._draws)  # type: ignore[method-assign]
+            return super().complete(prompt)
+
+    provider = ScriptedProvider()
+
+    plan = Plan(name="p", steps=(Step(name="assess", max_attempts=5),))
+    engine = Engine(store=store, provider=provider, handlers={"assess": assess})
+    run = engine.submit(RunSpec(plan=plan, payload={}, idempotency_key="attempts-run-01"))
+    final = engine.run(run.run_id, plan)
+
+    assert final.steps[0].attempts == 3, (
+        f"expected the record to show three provider calls, got {final.steps[0].attempts}"
+    )
+
+
+def test_a_step_can_declare_its_own_retry_budget(store) -> None:
+    """max_attempts on a Step must reach the engine.
+
+    A configuration field the engine never reads is worse than no field: it
+    looks like a control and silently is not one.
+    """
+    from durable_agent.engine import Engine, Escalation, StepContext
+    from durable_agent.models import Plan, RunSpec, RunStatus, Step
+    from durable_agent.providers import ChaosProvider
+
+    from .support import Decision
+
+    calls: list[int] = []
+
+    def assess(ctx: StepContext) -> dict:
+        try:
+            return ctx.ask("Assess this.", Decision).model_dump()
+        except Escalation:
+            calls.append(ctx.provider.calls)  # type: ignore[attr-defined]
+            raise
+
+    plan = Plan(name="p", steps=(Step(name="assess", max_attempts=7),))
+    provider = ChaosProvider(failure_rate=1.0, seed=1, modes=("unavailable",))
+    engine = Engine(store=store, provider=provider, handlers={"assess": assess})
+    run = engine.submit(RunSpec(plan=plan, payload={}, idempotency_key="budget-run-0001"))
+    final = engine.run(run.run_id, plan)
+
+    assert final.status is RunStatus.ESCALATED
+    assert calls == [7], f"the step asked for 7 attempts; the engine made {calls}"

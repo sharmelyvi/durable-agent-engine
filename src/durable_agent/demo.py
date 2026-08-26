@@ -124,7 +124,8 @@ def main(argv: list[str] | None = None) -> int:
         line("✗", f"{RED}{exc}{RESET}")
 
     state = engine.store.load(run.run_id)
-    assert state is not None
+    if state is None:
+        raise RuntimeError("the run vanished mid-demo")
     h("4. What survived the crash")
     for s in state.steps:
         line(

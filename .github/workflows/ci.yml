@@ -37,6 +37,8 @@ jobs:
         run: |
           ruff check src tests scripts
           ruff format --check src tests scripts
+      - name: Types
+        run: PYTHONPATH=src mypy
       - name: Test against both backends
         # The Postgres half of the matrix must actually run in CI. Letting it
         # skip silently would mean the backend is only ever exercised locally.

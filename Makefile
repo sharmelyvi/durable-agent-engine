@@ -2,11 +2,11 @@ VENV := .venv
 PY   := $(VENV)/bin/python
 PIP  := $(VENV)/bin/pip
 
-.PHONY: help setup verify test test-postgres pg-up pg-down lint fmt demo bench clean
+.PHONY: help setup verify test test-postgres pg-up pg-down lint types fmt demo bench clean
 
 help:
 	@echo "setup   install into .venv"
-	@echo "verify  lint + full test suite + demo (what CI runs)"
+	@echo "verify  lint + types + full test suite + demo (what CI runs)"
 	@echo "demo    crash a payment run and watch it recover"
 	@echo "bench   measure what delta correction actually saves"
 	@echo ""
@@ -18,7 +18,7 @@ setup:
 	$(PIP) install -q --upgrade pip
 	$(PIP) install -q -e ".[dev]"
 
-verify: lint test demo
+verify: lint types test demo
 	@echo ""
 	@echo "  verified: lint clean, suite green, demo invariant held"
 
@@ -39,6 +39,9 @@ test-postgres: pg-up
 lint:
 	$(VENV)/bin/ruff check src tests scripts
 	$(VENV)/bin/ruff format --check src tests scripts
+
+types:
+	PYTHONPATH=src $(VENV)/bin/mypy
 
 fmt:
 	$(VENV)/bin/ruff check --fix src tests scripts
