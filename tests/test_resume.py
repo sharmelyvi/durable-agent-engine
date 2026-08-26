@@ -97,9 +97,7 @@ def test_completed_run_is_not_re_executed(
     assert len(ledger.calls) == 1
 
 
-def test_checkpoints_record_token_cost_per_step(
-    engine: Engine, plan: Plan, submitted: str
-) -> None:
+def test_checkpoints_record_token_cost_per_step(engine: Engine, plan: Plan, submitted: str) -> None:
     """Cost is attributed to the step that spent it, not to the run as a lump."""
     final = engine.run(submitted, plan)
     by_name = {s.name: s for s in final.steps}

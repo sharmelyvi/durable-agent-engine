@@ -10,39 +10,13 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from pydantic import BaseModel, Field
 
 from durable_agent.engine import Engine, StepContext
 from durable_agent.models import Plan, RunSpec, Step
 from durable_agent.providers import MockProvider
 from durable_agent.store import SQLiteStore
 
-
-class Decision(BaseModel):
-    """The schema a model answer has to satisfy to be accepted."""
-
-    decision: str
-    confidence: float = Field(ge=0.0, le=1.0)
-
-
-class EffectLedger:
-    """Records every external effect, so a test can prove one happened once.
-
-    A counter would show how many times a step ran. Recording the token shows
-    whether the outside world would have deduplicated them, which is the
-    property that actually matters.
-    """
-
-    def __init__(self) -> None:
-        self.calls: list[str] = []
-
-    def charge(self, token: str) -> str:
-        self.calls.append(token)
-        return token
-
-    @property
-    def distinct(self) -> set[str]:
-        return set(self.calls)
+from .support import Decision, EffectLedger
 
 
 @pytest.fixture
