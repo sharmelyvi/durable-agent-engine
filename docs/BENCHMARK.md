@@ -51,11 +51,11 @@ whenever the previous response can be repaired from itself, and falls back to
 the original task only when the response contained no JSON at all — there being
 nothing to repair in that case.
 
-An earlier version chose on token count, and that was wrong in a way the numbers
-hid: the cheapest correction omitted the fields that had validated, so the model
-had to invent them, and an invented value in a valid shape passes validation.
-The fix was not a better heuristic. It was making the cheap retry correct, after
-which size stopped being the question.
+Choosing on token count gets this backwards. The cheapest correction is the one
+that omits the fields that validated — a fault list names only failures — so the
+model has to invent them, and an invented value in a valid shape passes
+validation. Size is the wrong question: a retry either carries enough to be
+repaired from, or it does not.
 
 ## What the numbers do not say
 

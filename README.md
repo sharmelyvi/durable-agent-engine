@@ -22,10 +22,9 @@ cd durable-agent-engine && make setup && make demo
 
 No API key. No database server. No configuration.
 
-The provider is a deterministic stub, and that is the point rather than a
-shortcut: the demo asserts an invariant, and an invariant you can only observe
-by spending money is one a reader cannot check. Swapping in a real model API is
-one class implementing `Provider.complete`.
+The provider is a deterministic stub, so the demo asserts an invariant a reader
+can check without spending money. A real model API is one class implementing
+`Provider.complete`.
 
 ## What the demo does
 
@@ -156,22 +155,23 @@ escalates anyway. Every figure in that column buys nothing, which is why the
 short row shows no saving rather than a negative one.
 
 The correction is a fixed 127 tokens whether it replaces a one-line question or
-nine thousand tokens of history. That is the property worth having: the cost of
-a retry stops scaling with the context it is repairing.
+nine thousand tokens of history: the cost of a retry does not scale with the
+context it repairs.
 
-It carries the model's own previous answer, and that is not padding. A fault
-list names only the fields that *failed* — a field that validated has no fault,
-so it is absent. A correction built from faults alone therefore asks for the
-full object while withholding the part the model got right, and the model has to
-invent it. An invented value in a valid shape passes validation and reaches the
-caller as fact; on a decision schema that is approve or deny, decided by a
-guess. Thirty tokens buy that away.
+It carries the model's own previous answer. A fault list names only the fields
+that *failed* — a field that validated has no fault, so it is absent. A
+correction built from faults alone therefore asks for the full object while
+withholding the part the model got right, and the model has to invent it. An
+invented value in a valid shape passes validation and reaches the caller as
+fact; on a decision schema that is approve or deny, decided by a guess. Thirty
+tokens buy that away.
 
 One retry does not use the correction at all. When a response contained no JSON
 there is no draft to repair, so the original task goes back with an explicit
 instruction about the format. The branch is about what can be repaired, not
-about which prompt is shorter — an earlier version chose on token count and got
-this exactly backwards.
+about which prompt is shorter. Choosing on token count gets it backwards: the
+cheaper prompt is the one that cannot recover, because the fields that validated
+are exactly the ones a fault list omits.
 
 Token counts are a character-count estimate at 4 chars/token, applied
 identically to both arms. The absolute numbers are approximate; the ratio and
