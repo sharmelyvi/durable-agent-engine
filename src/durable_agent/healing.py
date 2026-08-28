@@ -4,8 +4,9 @@ When a model returns something a schema rejects, the reflexive fix is to send
 the original prompt again and hope. That pays full price for the context a
 second time, and it gives the model no information about what was wrong.
 
-This module does the opposite: it extracts the exact fields that failed and
-sends only those back. The saving is measured in ``scripts/benchmark.py`` rather
+This module sends back the answer and its faults instead of the task. That is
+self-contained — the model repairs a draft it can see — and it costs a fraction
+of the context it replaces. The saving is measured in ``scripts/benchmark.py`` rather
 than asserted here — see docs/BENCHMARK.md for the numbers and how to reproduce
 them.
 
@@ -26,6 +27,10 @@ from pydantic import BaseModel, ValidationError
 T = TypeVar("T", bound=BaseModel)
 
 MAX_CORRECTION_ROUNDS = 2
+
+# The fault raised when a response held no JSON at all. Named because the
+# retry strategy branches on it: there is nothing to repair from.
+UNPARSEABLE_FIELD = "<response>"
 
 _FENCE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
 
@@ -127,36 +132,62 @@ def faults_from(error: ValidationError) -> list[FieldFault]:
     return faults
 
 
-def correction_prompt(faults: list[FieldFault], schema_name: str) -> str:
-    """The delta prompt: what was wrong, nothing else.
+def correction_prompt(previous: str, faults: list[FieldFault], schema_name: str) -> str:
+    """The delta prompt: the previous answer, and exactly what was wrong with it.
 
-    It carries no task description and no original context, because the model
-    is not being asked to redo the task — only to fix named fields.
+    Carrying the previous answer is what makes this self-contained, and leaving
+    it out was a silent data-loss bug rather than an economy.
+
+    A fault list only names the fields that *failed*. A field that validated is
+    correct and therefore absent — so a prompt built from faults alone asks the
+    model to "return the full corrected object" while withholding the parts of
+    that object it got right. The model cannot recover them and has to invent
+    them, and an invented value in a valid shape passes validation and reaches
+    the caller as fact. On a decision schema that is the difference between
+    approve and deny, decided by a guess.
+
+    The previous answer costs a few dozen tokens and removes the guess. What it
+    still does not carry is the task, which is deliberate: schema validation
+    catches shape, and shape can be repaired from the answer alone.
     """
     payload = json.dumps([f.as_dict() for f in faults], ensure_ascii=False)
     return (
-        f"CORRECTION for {schema_name}. Your previous answer failed validation.\n"
-        f"Fix ONLY these fields and return the full corrected JSON object:\n{payload}"
+        f"CORRECTION for {schema_name}.\n"
+        f"Your previous response was:\n{previous.strip()}\n\n"
+        f"It failed validation on these fields:\n{payload}\n\n"
+        "Fix ONLY the invalid fields, keep every valid field exactly as it was, "
+        "and return the complete corrected JSON object."
     )
 
 
-def cheaper_retry(original: str, correction: str) -> str:
-    """Pick the cheaper retry, but never one carrying no information.
+def is_unparseable(faults: list[FieldFault]) -> bool:
+    """Whether the response held no JSON at all, rather than the wrong JSON."""
+    return any(f.field == UNPARSEABLE_FIELD for f in faults)
 
-    Delta correction is not universally cheaper. On a short prompt the fault
-    description is longer than the prompt it replaces — measured at -105% in
-    scripts/benchmark.py, which is what this function exists for.
 
-    The fallback is not the bare original, though. Resending the exact prompt
-    that just failed tells the model nothing about what was wrong, so a
-    deterministic model returns the same invalid answer and the correction round
-    is spent for nothing. The original plus a short fault note is still cheaper
-    than a full delta at that size, and unlike a bare resend it can actually
-    succeed.
+def build_retry_prompt(
+    original: str, previous: str, faults: list[FieldFault], schema_name: str
+) -> str:
+    """The retry to send, chosen by what can be repaired rather than by size.
+
+    A response that failed validation is still a draft: it holds the fields the
+    model got right, so the cheap self-contained correction can repair it and
+    the task never has to be resent.
+
+    A response that held no JSON is not a draft. There is nothing in it to
+    preserve and nothing to correct, so the only thing that can succeed is the
+    original task with an explicit instruction about the format. That is the
+    expensive path, and it is the right one exactly when the cheap path cannot
+    work — which is the distinction an earlier version of this got wrong by
+    choosing on token count instead.
     """
-    if len(correction) < len(original):
-        return correction
-    return f"{original}\n\n{correction}"
+    if is_unparseable(faults):
+        return (
+            f"{original}\n\n"
+            f"ERROR: your previous response contained no JSON. Return only a JSON "
+            f"object matching {schema_name}, with no surrounding text."
+        )
+    return correction_prompt(previous, faults, schema_name)
 
 
 def parse_or_faults(text: str, schema: type[T]) -> tuple[T | None, list[FieldFault]]:
@@ -173,7 +204,7 @@ def parse_or_faults(text: str, schema: type[T]) -> tuple[T | None, list[FieldFau
     except Unparseable:
         return None, [
             FieldFault(
-                field="<response>",
+                field=UNPARSEABLE_FIELD,
                 problem="response was not valid JSON",
                 received=text[:120],
             )

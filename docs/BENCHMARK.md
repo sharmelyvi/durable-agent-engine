@@ -46,10 +46,16 @@ This is the case the technique is usually presented without. It is also easy to
 hit: short, tightly scoped prompts are exactly what a well-factored agent step
 looks like.
 
-`healing.cheaper_retry()` picks whichever retry is smaller, which is the
-`engine` column. It never posts a negative saving, and at short prompt sizes it
-falls back to resending the original — which also preserves the model's full
-task context, so the fallback is the better move rather than a concession.
+`healing.build_retry_prompt()` does not choose on size. It sends the correction
+whenever the previous response can be repaired from itself, and falls back to
+the original task only when the response contained no JSON at all — there being
+nothing to repair in that case.
+
+An earlier version chose on token count, and that was wrong in a way the numbers
+hid: the cheapest correction omitted the fields that had validated, so the model
+had to invent them, and an invented value in a valid shape passes validation.
+The fix was not a better heuristic. It was making the cheap retry correct, after
+which size stopped being the question.
 
 ## What the numbers do not say
 

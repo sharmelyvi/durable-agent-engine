@@ -258,3 +258,28 @@ imagination rather than by a real case.
 actual API is a small amount of code and would make the test suite depend on a
 key, a network and a bill — which would make the claims here unverifiable by the
 person reading them.
+
+
+## Operational trade-offs
+
+Deployment-shaped rather than engine-shaped: none of these change what the
+engine guarantees, and all of them decide what it costs to run.
+
+**Connections are opened per operation.** There is no pool. Postgres defaults to
+100 `max_connections`, so several hundred concurrent workers would exhaust it
+and start being refused. PgBouncer in front, or `psycopg_pool` sized against
+measured contention, is the answer — and the sizing needs the measurement, which
+is why there is no arbitrary number here. It is honest at this scale and wrong
+at a larger one.
+
+**Checkpoints hold their payloads inline.** Step output and run payload go into
+the row as JSONB. A step returning a 25MB document puts 25MB in the checkpoint,
+bloats the WAL, and slows every resume that reads it back. The production shape
+is a URI in the checkpoint and the bytes in object storage; the checkpoint
+contract does not change, only what it stores.
+
+**The token estimator is four characters per token,** not a real tokenizer. A
+real one would need either a network fetch of encoding files on first use or a
+model-specific dependency, and `make demo` promises neither. The benchmark
+applies the same estimate to both arms, so the ratio holds and the absolute
+figure does not. Fine for a ratio, wrong for a bill.

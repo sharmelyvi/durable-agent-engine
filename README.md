@@ -5,10 +5,15 @@ agent run survives the process dying mid-flight: it resumes where it stopped,
 does not pay again for work already done, and does not repeat an effect that
 already reached the outside world.
 
-Most agent frameworks keep run state in memory. That is fine until a worker is
-restarted, a deploy rolls, or a container is evicted — and then a five-step plan
-starts again at step one, spending tokens a second time and, if one of those
-steps charged a card or sent a message, doing it twice.
+Durable execution engines solve this — Temporal, Restate and DBOS all persist
+run state, and at scale they are the right answer. This is the same mechanism
+built from first principles and small enough to read end to end: what the
+database actually enforces, where the guarantee stops holding, and why.
+
+The failure it exists for: a worker is restarted, a deploy rolls, or a container
+is evicted, and a five-step plan starts again at step one — spending tokens a
+second time and, if one of those steps charged a card or sent a message, doing
+it twice.
 
 ```bash
 git clone https://github.com/sharmelyvi/durable-agent-engine
@@ -16,6 +21,11 @@ cd durable-agent-engine && make setup && make demo
 ```
 
 No API key. No database server. No configuration.
+
+The provider is a deterministic stub, and that is the point rather than a
+shortcut: the demo asserts an invariant, and an invariant you can only observe
+by spending money is one a reader cannot check. Swapping in a real model API is
+one class implementing `Provider.complete`.
 
 ## What the demo does
 
@@ -53,7 +63,7 @@ then lets a second worker pick the run up.
   The run crashed, resumed, and the customer was charged once.
 ```
 
-`make demo --crash-at 3` kills it *after* the charge instead, which is the
+`make demo-late` kills it *after* the charge instead, which is the
 window that actually costs money. The result is the same: one charge.
 
 ## Four invariants, and the mechanism behind each
@@ -129,68 +139,66 @@ Each invariant has tests that try to break it:
 ## Measured, including where it loses
 
 When a model returns output that violates the schema, the reflexive fix is to
-resend the whole prompt. Sending only the fields that failed is cheaper — but
-not always, and the benchmark says where the line is.
+resend the whole prompt. Sending the model its own answer and the faults in it
+is cheaper — but not always, and the benchmark says where the line is.
 
 ```
-context                                      naive     delta    engine   vs delta
-short (a one-line question)            43 (no fix)        88       131        +43
-medium (a page of policy)             636 (no fix)        88        88       same
-long (a full customer history)       3071 (no fix)        88        88       same
-very long (history + policy + logs)  9159 (no fix)        88        88       same
+context                              naive resend*   correction    saved
+short (a one-line question)                     43          127        —
+medium (a page of policy)                      636          127      80%
+long (a full customer history)                3071          127      96%
+very long (history + policy + logs)           9159          127      99%
 ```
 
-Where the delta is smaller it saves 86-99% of the retry. The interesting column
-is `naive`: resending an unchanged prompt is the cheapest thing on the table and
-**recovers nothing**, because a deterministic model given identical input
-returns its identical invalid answer. It is spent twice and escalates anyway.
+`*` A bare resend never recovers. A deterministic model given identical input
+returns its identical invalid answer, so the round is spent and the run
+escalates anyway. Every figure in that column buys nothing, which is why the
+short row shows no saving rather than a negative one.
 
-On a one-line prompt the fault description costs more than the prompt it would
-replace, so `cheaper_retry()` keeps the original and attaches the fault to it —
-131 tokens instead of 43, and the only arm in that row that ends with a valid
-object. Cost per retry is the wrong axis; cost per *recovered* response is the
-one that decides.
+The correction is a fixed 127 tokens whether it replaces a one-line question or
+nine thousand tokens of history. That is the property worth having: the cost of
+a retry stops scaling with the context it is repairing.
+
+It carries the model's own previous answer, and that is not padding. A fault
+list names only the fields that *failed* — a field that validated has no fault,
+so it is absent. A correction built from faults alone therefore asks for the
+full object while withholding the part the model got right, and the model has to
+invent it. An invented value in a valid shape passes validation and reaches the
+caller as fact; on a decision schema that is approve or deny, decided by a
+guess. Thirty tokens buy that away.
+
+One retry does not use the correction at all. When a response contained no JSON
+there is no draft to repair, so the original task goes back with an explicit
+instruction about the format. The branch is about what can be repaired, not
+about which prompt is shorter — an earlier version chose on token count and got
+this exactly backwards.
 
 Token counts are a character-count estimate at 4 chars/token, applied
-identically to every arm. The absolute numbers are approximate; the ratio and
+identically to both arms. The absolute numbers are approximate; the ratio and
 the recovery outcome are the claim. Reproduce with `make bench`.
 
 ## Limits
 
-Stated here rather than discovered later.
+Stated here rather than discovered later. Four shape the engine; the operational
+trade-offs behind them are in
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#operational-trade-offs).
 
 - **SQLite is the default, not the only backend.** It is what makes the demo run
   with no setup, and its lock is a lease row that serialises a single machine.
   `PostgresStore` uses native advisory locks and coordinates workers across
-  machines; `make test-postgres` runs the whole suite against it. What is *not*
-  here is a connection pool — connections are opened per operation, which is
-  honest at this scale and wrong at a larger one.
+  machines; `make test-postgres` runs the whole suite against it.
 - **Plans are sequences, not graphs.** Steps run in order, in-process. There is
   no conditional branch, no parallel fan-out and no worker pool. Conditional
   logic lives inside a step's handler today; explicit dependencies between steps
   would be the change that makes it a DAG.
-- **Checkpoints hold their payloads inline.** Step output and run payload go
-  into the row as JSONB. A step returning a 25MB document would put 25MB in the
-  checkpoint, bloat the WAL and slow every resume that reads it back. The
-  production shape is a URI in the checkpoint and the bytes in object storage.
-- **Connections are opened per operation.** Postgres defaults to 100
-  `max_connections`; several hundred concurrent workers would exhaust that and
-  start being refused. PgBouncer in front, or `psycopg_pool` sized against
-  measured contention, is the answer — and the sizing needs the measurement,
-  which is why there is no arbitrary number here.
 - **A hung handler holds its lock.** The engine hands network calls to the
   handler and does not impose a deadline. A handler that blocks forever — an
   HTTP call with no timeout — keeps the Postgres session lock indefinitely,
-  because the connection never closes. Bound your handlers. Note that the
-  at-most-once guarantee survives this anyway: see below.
+  because the connection never closes. Bound your handlers. The at-most-once
+  guarantee survives this anyway, for the reason in I-3.
 - **No compensation.** A run that escalates after a committed effect leaves that
   effect in place; there is no rollback step. Compensating actions are the
-  obvious next layer and are deliberately out of scope for now.
-- **The provider is a stub.** No adapter for a real model API ships here on
-  purpose: a claim that can only be checked by spending money is not a claim a
-  reader can check.
-- **The token estimator is crude.** Four characters per token, not a real
-  tokenizer. Fine for a ratio, wrong for a bill.
+  obvious next layer and are deliberately out of scope.
 
 ## Layout
 

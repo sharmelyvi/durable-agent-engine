@@ -48,7 +48,12 @@ fmt:
 	$(VENV)/bin/ruff format src tests scripts
 
 demo:
-	@PYTHONPATH=src $(PY) -m durable_agent.demo
+	@PYTHONPATH=src $(PY) -m durable_agent.demo $(ARGS)
+
+# Kills the run *after* the charge instead of before it: the window that
+# actually costs money. Same result, one charge.
+demo-late:
+	@PYTHONPATH=src $(PY) -m durable_agent.demo --crash-at 3
 
 bench:
 	@PYTHONPATH=src $(PY) scripts/benchmark.py

@@ -19,8 +19,9 @@ from pydantic import BaseModel, Field
 
 from durable_agent.healing import (
     MAX_CORRECTION_ROUNDS,
-    cheaper_retry,
+    build_retry_prompt,
     correction_prompt,
+    is_unparseable,
     json_candidates,
     parse_or_faults,
 )
@@ -84,34 +85,67 @@ def test_braces_inside_strings_do_not_confuse_the_scanner() -> None:
     assert parsed.decision == "approve {not a brace}"
 
 
-def test_a_short_prompt_retry_still_carries_the_fault() -> None:
-    """The failure mode this guards: a retry that repeats itself.
+def test_a_correction_carries_the_fields_the_model_got_right() -> None:
+    """The bug this replaced: a fault list names only what failed.
 
-    When the delta costs more than the prompt it would replace, the cheaper
-    move is to resend the original — but resending it *bare* tells the model
-    nothing, so a deterministic model returns the same invalid answer and the
-    correction round is spent for nothing.
+    ``decision`` validated, so it is absent from the faults. A correction built
+    from faults alone asks for the full object while withholding the part that
+    was already correct, and the model has to invent it — an invented value in a
+    valid shape passes validation and is returned as fact.
     """
-    _, faults = parse_or_faults('{"decision":"a","confidence":"high"}', Decision)
-    delta = correction_prompt(faults, "Decision")
-    short = "Approve?"
+    answer = '{"decision":"approve","confidence":"very high"}'
+    _, faults = parse_or_faults(answer, Decision)
+    assert {f.field for f in faults} == {"confidence"}, "decision was valid, so it has no fault"
 
-    retry = cheaper_retry(short, delta)
+    retry = correction_prompt(answer, faults, "Decision")
 
-    assert retry != short, "a bare resend carries no information about the failure"
-    assert "CORRECTION" in retry
-    assert short in retry, "and it keeps the original task context"
+    assert "approve" in retry, "the value that validated must survive the round"
+    assert "confidence" in retry
 
 
-def test_a_long_prompt_retry_drops_the_context_it_would_repeat() -> None:
+def test_a_correction_does_not_resend_the_task() -> None:
+    """Self-contained means the answer, not the question."""
     long_prompt = "Assess this transaction.\n" + ("history line\n" * 200)
-    _, faults = parse_or_faults('{"decision":"a","confidence":"high"}', Decision)
-    delta = correction_prompt(faults, "Decision")
+    answer = '{"decision":"approve","confidence":"very high"}'
+    _, faults = parse_or_faults(answer, Decision)
 
-    retry = cheaper_retry(long_prompt, delta)
+    retry = build_retry_prompt(long_prompt, answer, faults, "Decision")
 
-    assert retry == delta
-    assert len(retry) < len(long_prompt) / 10
+    assert "Assess this transaction" not in retry
+    assert len(retry) < len(long_prompt) / 5
+
+
+def test_a_response_with_no_json_gets_the_task_back() -> None:
+    """The one case a self-contained correction cannot serve.
+
+    There is no draft to repair, so the only retry that can succeed is the
+    original task with an explicit instruction about the format. The branch is
+    about what is repairable, not about which prompt is shorter.
+    """
+    long_prompt = "Assess this transaction.\n" + ("history line\n" * 200)
+    refusal = "I'm sorry, I can't help with that."
+    _, faults = parse_or_faults(refusal, Decision)
+    assert is_unparseable(faults)
+
+    retry = build_retry_prompt(long_prompt, refusal, faults, "Decision")
+
+    assert "Assess this transaction" in retry, "nothing else can carry the task"
+    assert "no JSON" in retry
+
+
+def test_the_expensive_retry_is_only_used_when_the_cheap_one_cannot_work() -> None:
+    """Both directions, so the branch cannot quietly invert."""
+    prompt = "Assess this.\n" + ("line\n" * 200)
+    repairable = '{"decision":"approve","confidence":"very high"}'
+
+    _, faults = parse_or_faults(repairable, Decision)
+    cheap = build_retry_prompt(prompt, repairable, faults, "Decision")
+
+    _, junk_faults = parse_or_faults("no json here at all", Decision)
+    expensive = build_retry_prompt(prompt, "no json here at all", junk_faults, "Decision")
+
+    assert len(cheap) < len(expensive)
+    assert "Assess this" not in cheap and "Assess this" in expensive
 
 
 def test_correction_rounds_stay_bounded() -> None:

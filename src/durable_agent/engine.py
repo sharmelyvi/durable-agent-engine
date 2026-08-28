@@ -36,8 +36,7 @@ from pydantic import BaseModel
 
 from .healing import (
     MAX_CORRECTION_ROUNDS,
-    cheaper_retry,
-    correction_prompt,
+    build_retry_prompt,
     parse_or_faults,
 )
 from .models import (
@@ -165,7 +164,10 @@ class StepContext:
                 fields = ", ".join(f.field for f in faults)
                 raise Escalation(f"schema still invalid after {corrections} corrections: {fields}")
             corrections += 1
-            current = cheaper_retry(prompt, correction_prompt(faults, schema.__name__))
+            # Repairable answers are corrected from themselves, which keeps the
+            # fields the model got right; a response with no JSON in it has
+            # nothing to preserve and gets the task back instead.
+            current = build_retry_prompt(prompt, completion.text, faults, schema.__name__)
 
         raise Escalation(f"exhausted {budget} attempts without a valid response")
 
