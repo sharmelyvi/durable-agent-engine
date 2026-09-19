@@ -10,3 +10,15 @@ build/
 .coverage
 htmlcov/
 bench-results.json
+
+# Secrets: el nombre exacto varia segun el SDK, asi que cubrimos las formas.
+.env.*
+!.env.example
+*.pem
+*.key
+id_rsa*
+credentials*.json
+client_secret*.json
+secrets*.json
+token*.json
+service-account*.json
